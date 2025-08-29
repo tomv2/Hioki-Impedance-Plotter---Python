@@ -1,0 +1,108 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from tkinter import Tk, filedialog
+from scipy.optimize import least_squares
+
+
+root = Tk()
+root.withdraw()
+file_path_meas = filedialog.askopenfilename(
+    title="Select Measurement CSV File",
+    filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+)
+
+df_meas = pd.read_csv(file_path_meas, skiprows=16, encoding="shift_jis")
+df_meas.columns = ["No", "Frequency_Hz", "Impedance_Ohm", "Phase_deg"]
+
+f_meas = df_meas["Frequency_Hz"].values
+Zmag_meas = df_meas["Impedance_Ohm"].values
+phase_deg = df_meas["Phase_deg"].values
+Z_meas = Zmag_meas * np.exp(1j * np.deg2rad(phase_deg))
+
+
+file_path_probe = filedialog.askopenfilename(
+    title="Select Probe Compensation CSV",
+    filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+)
+
+df_probe = pd.read_csv(file_path_probe, skiprows=16, encoding="shift_jis")
+df_probe.columns = ["No", "Frequency_Hz", "Impedance_Ohm", "Phase_deg"]
+
+f_probe = df_probe["Frequency_Hz"].values
+Zmag_probe = df_probe["Impedance_Ohm"].values
+phase_probe = df_probe["Phase_deg"].values
+Z_probe = Zmag_probe * np.exp(1j * np.deg2rad(phase_probe))
+
+
+Z_probe_interp = np.interp(np.log(f_meas), np.log(f_probe), np.real(Z_probe)) + \
+                 1j * np.interp(np.log(f_meas), np.log(f_probe), np.imag(Z_probe))
+
+
+Z_compensated = Z_meas - Z_probe_interp
+measured_R = np.real(Z_compensated)
+measured_X = np.imag(Z_compensated)
+
+
+Ra121 = 2990
+Rinput = 200
+Ccoupling = 0.709e-9
+
+def model_impedance(f, Ca121, Canode):
+    Za121 = Rinput + ((1j * Ra121 * (1/(2*np.pi*f*Ca121))) /
+                      (Ra121 + 1j*(1/(2*np.pi*f*Ca121))))
+    Zanode = 1j / (2*np.pi*f*Canode)
+    Zcoupling = 1j / (2*np.pi*f*Ccoupling)
+    Ztotal = Zcoupling + (Zanode * Za121) / (Zanode + Za121)
+    return Ztotal
+
+def model_RX(f, Ca121, Canode):
+    Z = model_impedance(f, Ca121, Canode)
+    return np.real(Z), np.imag(Z)
+
+initial_guess = [4e-12, 9e-12]
+
+def residuals(params, f, R_meas, X_meas):
+    Ca121, Canode = params
+    Rm, Xm = model_RX(f, Ca121, Canode)
+    return np.concatenate([Rm - R_meas, Xm - X_meas])
+
+
+R0, X0 = model_RX(f_meas, *initial_guess)
+
+plt.figure(figsize=(10,6))
+plt.semilogx(f_meas, measured_R, label="Measured Resistance (compensated)")
+plt.semilogx(f_meas, np.abs(measured_X), label="Measured Reactance (compensated)")
+plt.semilogx(f_meas, R0, "--", label="Model Resistance (initial)")
+plt.semilogx(f_meas, np.abs(X0), "--", label="Model Reactance (initial)")
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Impedance (Ω)")
+plt.title("Measured vs Initial Model")
+plt.grid(True, which="both", ls="--", lw=0.5)
+plt.legend()
+plt.show()
+
+
+result = least_squares(
+    residuals, initial_guess,
+    args=(f_meas, measured_R, measured_X),
+    bounds=([1e-13, 1e-13], [1e-10, 1e-10])
+)
+
+Ca121_fit, Canode_fit = result.x
+print(f"Fitted values:\n  Ca121 = {Ca121_fit:.3e} F\n  Canode = {Canode_fit:.3e} F")
+
+
+Rf, Xf = model_RX(f_meas, Ca121_fit, Canode_fit)
+
+plt.figure(figsize=(10,6))
+plt.semilogx(f_meas, measured_R, label="Measured Resistance (compensated)")
+plt.semilogx(f_meas, np.abs(measured_X), label="Measured Reactance (compensated)")
+plt.semilogx(f_meas, Rf, "-", label="Fitted Resistance")
+plt.semilogx(f_meas, np.abs(Xf), "-", label="Fitted Reactance")
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Impedance (Ω)")
+plt.title("Measured vs Best-Fit Model")
+plt.grid(True, which="both", ls="--", lw=0.5)
+plt.legend()
+plt.show()
