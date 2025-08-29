@@ -1,0 +1,114 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from tkinter import Tk, filedialog
+from scipy.optimize import least_squares
+
+# ========================
+# Load CSV file
+# ========================
+root = Tk()
+root.withdraw()
+file_path = filedialog.askopenfilename(
+    title="Select CSV File",
+    filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+)
+
+# Skip metadata rows and read actual data (Hioki often uses Shift-JIS)
+df = pd.read_csv(file_path, skiprows=16, encoding="shift_jis")
+df.columns = ["No", "Frequency_Hz", "Impedance_Ohm", "Phase_deg"]
+
+# Extract measured data
+f_meas = df["Frequency_Hz"].values
+Zmag_meas = df["Impedance_Ohm"].values
+phase_deg = df["Phase_deg"].values
+
+# ========================
+# Constants
+# ========================
+Ra121 = 2990
+Rinput = 200
+Ccoupling = 0.709e-9  # fixed
+
+# ========================
+# Measured R and X (signed!)
+# ========================
+Z_complex = Zmag_meas * np.exp(1j * np.deg2rad(phase_deg))
+measured_R = np.real(Z_complex)
+measured_X = np.imag(Z_complex)
+
+# ========================
+# Model impedance (signed correctly for capacitors)
+# ========================
+def model_impedance(f, Ca121, Canode):
+    # Capacitor reactances are negative imaginary
+    Za121 = Rinput + ((-1j * Ra121 * (1/(2*np.pi*f*Ca121))) /
+                      (Ra121 - 1j*(1/(2*np.pi*f*Ca121))))
+    Zanode = -1j / (2*np.pi*f*Canode)
+    Zcoupling = -1j / (2*np.pi*f*Ccoupling)
+    
+    # Total impedance: series-parallel combination
+    Ztotal = Zcoupling + (Zanode * Za121) / (Zanode + Za121)
+    return Ztotal
+
+# Extract R and X from model
+def model_RX(f, Ca121, Canode):
+    Z = model_impedance(f, Ca121, Canode)
+    return np.real(Z), np.imag(Z)
+
+
+# ========================
+# Initial guesses and residuals
+# ========================
+initial_guess = [4e-12, 9e-12]  # Ca121, Canode
+
+def residuals(params, f, R_meas, X_meas):
+    Ca121, Canode = params
+    Rm, Xm = model_RX(f, Ca121, Canode)
+    return np.concatenate([Rm - R_meas, Xm - X_meas])
+
+# ========================
+# Figure 1: Measured vs Initial Model
+# ========================
+R0, X0 = model_RX(f_meas, *initial_guess)
+
+plt.figure(figsize=(10,6))
+plt.semilogx(f_meas, measured_R, label="Measured Resistance")
+plt.semilogx(f_meas, measured_X, label="Measured Reactance (signed)")
+plt.semilogx(f_meas, R0, "--", label="Model Resistance (initial)")
+plt.semilogx(f_meas, X0, "--", label="Model Reactance (initial, signed)")
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Impedance (Ω)")
+plt.title("Measured vs Initial Model")
+plt.grid(True, which="both", ls="--", lw=0.5)
+plt.legend()
+plt.show()
+
+# ========================
+# Fit Ca121 and Canode
+# ========================
+result = least_squares(
+    residuals, initial_guess,
+    args=(f_meas, measured_R, measured_X),
+    bounds=([1e-13, 1e-13], [1e-10, 1e-10])  # reasonable capacitor range
+)
+
+Ca121_fit, Canode_fit = result.x
+print(f"Fitted values:\n  Ca121 = {Ca121_fit:.3e} F\n  Canode = {Canode_fit:.3e} F")
+
+# ========================
+# Figure 2: Measured vs Best-Fit Model
+# ========================
+Rf, Xf = model_RX(f_meas, Ca121_fit, Canode_fit)
+
+plt.figure(figsize=(10,6))
+plt.semilogx(f_meas, measured_R, label="Measured Resistance")
+plt.semilogx(f_meas, measured_X, label="Measured Reactance (signed)")
+plt.semilogx(f_meas, Rf, "-", label="Fitted Resistance")
+plt.semilogx(f_meas, Xf, "-", label="Fitted Reactance (signed)")
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Impedance (Ω)")
+plt.title("Measured vs Best-Fit Model")
+plt.grid(True, which="both", ls="--", lw=0.5)
+plt.legend()
+plt.show()
